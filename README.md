@@ -91,6 +91,50 @@ edge/data_collector/data_collect.py
 ```
 This script reads sensor and CAN bus data, logs to CSV, performs ML inference, and uploads data to Google Cloud Pub/Sub and Storage.
 
+### 3. Setup Google Cloud
+
+1. Authenticate GCP on Raspberry Pi (One-Time Setup)
+
+   Install the Google Cloud SDK on Raspberry Pi or Local Machine
+   
+   Before using any Google Cloud services, authenticate your Raspberry Pi:
+
+```bash
+gcloud init
+```
+Sign in with your Google account
+
+Select the correct GCP project
+
+Set a default region (e.g., us-central1)
+
+Verify GCS and Pub/Sub APIs are enabled
+
+Make sure you’ve also set up your service account key if you're using google-cloud libraries directly in code:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/home/pi/keys/gcp-service-account.json"
+```
+
+2. Create GCS Bucket and Upload Sample Data (One-Time Setup)
+Use the provided script to automate this step:
+
+```bash
+chmod +x setup_and_upload_gcs.sh
+./setup_and_upload_gcs.sh
+```
+
+This script will:
+
+Check if the gs://tractor-data-bucket exists (you can change the name inside the script)
+
+Create the bucket if it doesn’t exist
+
+Upload the current combined_log.csv to gs://tractor-data-bucket/sensor_data/
+
+
+
+
 ### 3. Schedule Daily Upload Cron Job
 
 To automate daily uploads of the combined log CSV to Google Cloud Storage:
