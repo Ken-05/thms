@@ -5,193 +5,253 @@ An end-to-end machine learning and IoT system with cloud analytics for real-time
 
 An end-to-end machine learning and IoT system with cloud analytics for real-time tractor health monitoring using sensor and CAN bus data.
 
----
 
-## 📦 Features
 
-- 📡 Real-time data collection from sensors and CAN bus
-- 🤖 ML-based anomaly detection and fault classification
-- 🔁 Multi-modal data fusion: Sensor + CAN data
-- 📊 PyQt5 GUI for in-cabin tractor display
-- ☁️ Google Cloud Platform integration for training and analytics
-- 🔁 Model updates from cloud to edge (TensorFlow Lite)
+# Tractor Health Monitoring: Edge-to-Cloud MLOps Pipeline
 
----
+## Project Overview
 
-## 🧱 Architecture Overview
+This project implements a comprehensive MLOps pipeline for real-time tractor health monitoring, spanning from edge device data collection to cloud-based machine learning model training to edge model deployment. The system is designed to detect anomalies and classify potential faults in tractor operations, enabling predictive maintenance and improving operational efficiency.
 
-- **Edge Layer**: Raspberry Pi + Arduino for data ingestion, ML inference, and GUI display
-- **Cloud Layer (GCP)**: Model training, storage, fleet-wide analysis
-- **Multi-Modal ML**: Separate encoders for sensor and CAN data, merged for prediction
+The solution leverages Google Cloud Platform (GCP) services for scalable data storage, robust machine learning workflows, and model serving, while utilizing edge devices (e.g., Raspberry Pi with Arduino/CAN bus interfaces) for local data acquisition and real-time inference.
 
----
+## Key Features
 
-## 🛠️ Tech Stack
+- **Edge Data Collection**: Gathers sensor data (e.g., temperature, levels, vibrations) and CAN bus logs directly from tractors.
+- **Edge Inference**: Runs lightweight TFLite models on the edge device for immediate anomaly detection and fault classification.
+- **Edge to Cloud Raw Data Upload**: Periodically uploads raw data from edge devices to Google Cloud Storage (GCS).
+- **Automated ML Pipeline (Kubeflow Pipelines on Vertex AI)**:
+  - **Data Ingestion**: Ingest raw data daily from Google Cloud Storage and load it into BigQuery for centralized storage and preprocessing.
+  - **Data Preprocessing**: Cleans, transforms, and engineers features from raw data.
+  - **Autoencoder Training**: Trains an LSTM autoencoder model on healthy data for anomaly detection.
+  - **Classifier Training**: Trains a multi-class CNN+LSTM classifier model to identify specific fault types.
+  - **Model Deployment**: Deploys trained models to Vertex AI Endpoints for serving.
+  - **Model Versioning & Sync**: New models trained in the cloud are automatically versioned and synced back to edge devices for continuous improvement.
+- **Local GUI**: A simple graphical interface on the edge device to display real-time sensor data, inference results, and system status.
 
-| Layer        | Tools & Libraries |
-|--------------|-------------------|
-| Edge         | Arduino, Raspberry Pi, PyQt5, TensorFlow Lite |
-| Data         | Python, pandas, scipy, python-can, cantools |
-| ML Models    | TensorFlow, Keras, LSTM Autoencoder, CNN+LSTM Classifier |
-| Cloud        | GCP Pub/Sub, Cloud Functions, Vertex AI, BigQuery, Looker Studio |
+## High-Level Architecture
 
----
+The system is divided into two primary layers: Edge and Cloud.
 
-## 🚀 Getting Started
+```
++---------------------+      +---------------------+      +---------------------+
+|                     |      |                     |      |                     |
+|    Tractor Sensors  |----->|   Edge Device       |----->|   Google Cloud      |
+|    (Arduino/CAN)    |      | (Raspberry Pi)      |      |     Platform        |
+|                     |      |                     |      |                     |
++---------------------+      +---------------------+      +---------------------+
+                                     |       ^
+                                     |       | (Model Sync)
+                                     |       |
+                                     v       |
++---------------------------------------------------------------------------------+
+|                                 Edge Layer                                      |
+|                                                                                 |
+|  +-------------------+   +-------------------+   +----------------------------+ |
+|  | Data Collection   |-->| Local Data Storage|-->| Data Upload Script         | |
+|  | (data_collect.py) |   | (combined_log.csv)|   | (upload_data_to_gcs.py)    | |
+|  +-------------------+   +-------------------+   +----------------------------+ |
+|           |                                                                     |
+|           v                                                                     |
+|  +------------------------+   +-----------------------+   +-------------------+ |
+|  | Edge Preprocessing     |-->| Local Inference       |-->| Local GUI Display | |
+|  | (edge_preprocess.py)   |   | (edge_inference.py)   |   | (tractor_display_gui.py)| |
+|  +------------------------+   +-----------------------+   +-------------------+ |
+|           ^                                                                     |
+|           | (Model Sync)                                                        |
+|  +------------------------+                                                     |
+|  | Model Update Script    |                                                     |
+|  | (update_models.py)     |                                                     |
+|  +------------------------+                                                     |
++---------------------------------------------------------------------------------+
+                                     |
+                                     | (Raw Data Upload)
+                                     v
++---------------------------------------------------------------------------------+
+|                                 Cloud Layer                                     |
+|                                                                                 |
+|  +-------------------+   +---------------------------------------------------+  |
+|  | GCS Raw Data      |-->| BigQuery (tractor_health_data.sensor_can_logs)    |  |
+|  | (raw_data_bucket) |   |                                                   |  |
+|  +-------------------+   +---------------------------------------------------+  |
+|           |                                                                     |
+|           v                                                                     |
+|  +---------------------------------------------------------------------------+  |
+|  |                     Vertex AI Pipelines (Kubeflow Pipelines)              |  |
+|  |  +-------------------+   +-------------------+   +-------------------+    |  |
+|  |  | 1. Data Ingestion |-->| 2. Data           |-->| 3. Autoencoder    |    |  |
+|  |  | (GCS to BigQuery) |   | Preprocessing     |   | Training          |    |  |
+|  |  +-------------------+   +-------------------+   +-------------------+    |  |
+|  |           |                       |                       |               |  |
+|  |           v                       v                       v               |  |
+|  |  +------------------------+   +-------------------+   +-------------------+  |
+|  |  | (Intermediate Artifacts|   | (Train/Val/Test   |   | (H5/TFLite Models)|  |
+|  |  | in Pipeline Root)      |   | CSVs, Scaler)     |   |                   |  |
+|  |  +------------------------+   +-------------------+   +-------------------+  |
+|  |                                   |                                       |  |
+|  |                                   v                                       |  |
+|  |  +-------------------+   +--------------------------+                     |  |
+|  |  | 4. Classifier     |-->| 5. Model Deployment      |                     |  |
+|  |  | Training          |   | (Vertex AI Endpoint)     |                     |  |
+|  |  +-------------------+   +--------------------------+                     |  |
+|  +---------------------------------------------------------------------------+  |
+|                                     |                                           |
+|                                     v                                           |
+|  +-------------------+   +-------------------+                                  |
+|  | GCS Models Bucket |<--| Vertex AI Endpoint|                                  |
+|  | (models_bucket)   |   | (Deployed Models) |                                  |
+|  +-------------------+   +-------------------+                                  |
++---------------------------------------------------------------------------------+
+```
+
+
+
+## Getting Started: Running the Entire System
+
+This section outlines the general steps to get the entire edge-to-cloud MLOps pipeline up and running. Refer to the detailed `docs/` for specific instructions.
 
 ### Prerequisites
 
-- Raspberry Pi running Linux (Raspbian or similar)
-- Arduino board for sensor data ingestion
-- Google Cloud Platform project with Storage bucket and Pub/Sub set up
-- Python 3 installed on Raspberry Pi
-- Required Python packages (see `requirements.txt`)
+- **Google Cloud SDK** (`gcloud`, `gsutil`) — Authenticated to your GCP project.
+- **Docker** — For building and pushing container images.
+- **Python 3.8+ and pip**
+- **jq** — A lightweight and flexible command-line JSON processor.
+- **yq** — A portable YAML processor.
+- **Edge Device** — A Raspberry Pi or similar Linux-based device with Python 3.8+, pip, and hardware interfaces.
 
-  
-### 🧰 Requirements
-Install dependencies:
+### High-Level Order of Operations
 
-```bash
-pip install -r requirements.txt
+**GCP Project Setup & APIs**:
+- Create a GCP Project.
+- Enable APIs: Compute Engine, Cloud Storage, BigQuery, Artifact Registry, Vertex AI, Cloud Build, IAM.
+- Create Service Accounts for:
+  - Edge Device (write access to raw data bucket).
+  - Vertex AI Pipelines (access to GCS, BQ, Vertex AI, etc.).
+- _Action_: Follow `docs/gcp_setup.md`.
 
+**Create GCS Buckets**:
+- Run: `cd edge/scripts && ./create_gcs_bucket.sh`
 
+**Build and Push Cloud Docker Images**:
+- Navigate to project root.
+- Build/push each component under `cloud/end_to_end_automated_pipeline/components/`.
+- _Action_: Follow `docs/gcp_setup.md`.
 
-### 🖥️ Run GUI (On Pi)
-```bash
-cd edge/gui
-python main_window.py
-```
+**Configure Cloud Settings**:
+- Edit `cloud/end_to_end_automated_pipeline/config/cloud_settings.yaml`.
 
-### ☁️ Upload to GCP
-```bash
-# Trigger data upload
-python edge/data_collector/data_collect.py
-```
+**Compile Kubeflow Pipeline**:
+- `cd cloud/end_to_end_automated_pipeline/end_to_end_pipeline && python end_to_end_automated_pipeline.py`
 
-### 🤖 Train ML Models (Cloud)
-```bash
-python cloud/training_pipeline/train_classifier.py
-python cloud/training_pipeline/train_autoencoder.py
-```
+**Run Cloud ML Pipeline**:
+- Manual: `python run_pipeline.py`
+- Scheduled: Use Vertex AI UI with the JSON blueprint.
 
-## Running the Project
+**Edge Device Setup**:
+- Clone repo, install dependencies.
+- Edit `edge/config/settings.json`.
+- Add `gcp-service-account.json` to `edge/keys/`.
+- Configure Arduino or CAN interfaces.
+- _Action_: See `docs/edge_setup.md`.
 
-### 1. Setting Up the Project Locally
+**Setup Edge Cron Jobs**:
+- `cd edge/scripts && ./setup_cron_upload_data_to_gcs.sh`
+- `cd edge/scripts && ./setup_cron_update_models.sh`
 
-Create the project directory structure and clone this repo.
-
----
-
-### 2. Data Collection and Upload
-
-The main data collection script is:
-
-```bash
-edge/data_collector/data_collect.py
-```
-This script reads sensor and CAN bus data, logs to CSV, performs ML inference, and uploads data to Google Cloud Pub/Sub and Storage.
-
-### 3. Setup Google Cloud
-
-1. Authenticate GCP on Raspberry Pi (One-Time Setup)
-
-   Install the Google Cloud SDK on Raspberry Pi or Local Machine
-   
-   Before using any Google Cloud services, authenticate your Raspberry Pi:
-
-```bash
-gcloud init
-```
-Sign in with your Google account
-
-Select the correct GCP project
-
-Set a default region (e.g., us-central1)
-
-Verify GCS and Pub/Sub APIs are enabled
-
-Make sure you’ve also set up your service account key if you're using google-cloud libraries directly in code:
-
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS="/home/pi/keys/gcp-service-account.json"
-```
-
-2. Create GCS Bucket and Upload Sample Data (One-Time Setup)
-Use the provided script to automate this step:
-
-```bash
-chmod +x setup_and_upload_gcs.sh
-./setup_and_upload_gcs.sh
-```
-
-This script will:
-
-Check if the gs://tractor-data-bucket exists (you can change the name inside the script)
-
-Create the bucket if it doesn’t exist
-
-Upload the current combined_log.csv to gs://tractor-data-bucket/sensor_data/
-
-
-
-
-### 3. Schedule Daily Upload Cron Job
-
-To automate daily uploads of the combined log CSV to Google Cloud Storage:
-
-1. SSH into your Raspberry Pi or open a terminal.
-
-2. Navigate to the project root folder:
-
-```bash
-cd /home/pi/tractor-health-monitoring
-```
-
-3. Make the setup script executable:
-
-```bash
-chmod +x scripts/setup_cron.sh
-```
-
-4. Run the setup script to add the cron job:
-
-```bash
-./scripts/setup_cron.sh
-```
-This will add a cron job that runs every day at 2:00 AM to upload the latest combined log to GCS.
-
-### 4. Manual Cron Job Setup (Alternative)
-
-If you prefer to add the cron job manually:
-
-1. Open the crontab editor:
-
-```bash
-crontab -e
-```
-
-2. Add the following line at the bottom:
-
-```bash
-0 2 * * * /usr/bin/python3 /home/pi/tractor-health-monitoring/cloud/gcp_functions/upload_to_gcs.py >> /home/pi/upload_log.txt 2>&1
-```
-
-3. Save and exit the editor.
-
-### 📁 Repo Structure
-
-| Path         | Description                               |
-|--------------|-------------------------------------------|
-| `edge/`      | Raspberry Pi-side code: data collection, inference, GUI     |
-| `cloud/`     | GCP scripts: model training, upload, dashboards |
-| `hardware/`  | Arduino code and wiring diagrams          |
-| `models/`    | Saved ML models (H5 and TFLite)              |
-| `data/`      | Sample or testing data logs               |
-| `scripts/`   | Utility scripts (e.g., cron setup)               |
-| `docs/`      | System diagrams and documentation         |
+**Start Edge Apps**:
+- `data_collect.py`, `edge_inference.py`, `tractor_display_gui.py`
 
 ---
+
+## Project Structure
+```
+.
+├── cloud/
+│   ├── end_to_end_automated_pipeline/
+│   │   ├── components/
+│   │   │   ├── autoencoder_training_container/
+│   │   │   │   ├── Dockerfile
+│   │   │   │   ├── main.py
+│   │   │   │   └── requirements
+│   │   │   ├── classifier_training_container/
+│   │   │   │   ├── Dockerfile
+│   │   │   │   ├── main.py
+│   │   │   │   └── requirements
+│   │   │   ├── data_ingestion_container/
+│   │   │   │   ├── Dockerfile
+│   │   │   │   ├── main.py
+│   │   │   │   └── requirements
+│   │   │   ├── data_preprocessing_container/
+│   │   │   │   ├── Dockerfile
+│   │   │   │   ├── main.py
+│   │   │   │   └── requirements
+│   │   │   └── model_deployment_container/
+│   │   │       ├── Dockerfile
+│   │   │       ├── main.py
+│   │   │       └── requirements
+│   │   ├── config/
+│   │   │   └── cloud_settings.yaml
+│   │   ├── core_utilities/
+│   │   │   ├── __init__.py
+│   │   │   └── preprocess.py
+│   │   ├── end_to_end_pipeline/
+│   │   │   ├── end_to_end_automated_pipeline.json
+│   │   │   ├── end_to_end_automated_pipeline.py
+│   │   │   └── run_pipeline.py
+│   │   └── training_pipeline/
+│   │       ├── __init__.py
+│   │       ├── train_autoencoder.py
+│   │       └── train_classifier.py
+├── docs/
+│   ├── architecture.md
+│   ├── data_schema.md
+│   ├── edge_setup.md
+│   └── gcp_setup.md
+├── edge/
+│   ├── config/
+│   │   └── settings.json
+│   ├── data/
+│   │   ├── combined_log.csv
+│   │   ├── combined_log_preprocessed.csv
+│   │   ├── test_data.csv
+│   │   └── train_data.csv
+│   ├── data_collector/
+│   │   ├── data_collect.py
+│   │   ├── upload_data_to_gcs.py
+│   │   └── upload_data_to_gcs_log.txt
+│   ├── gui/
+│   │   ├── latest_status.json
+│   │   └── tractor_display_gui.py
+│   ├── keys/
+│   │   └── gcp-service-account.json
+│   ├── model_inference/
+│   │   ├── __init__.py
+│   │   ├── edge_inference.py
+│   │   ├── edge_preprocess.py
+│   │   ├── update_models.log
+│   │   └── update_models.py
+│   ├── models/
+│   │   ├── current_models/
+│   │   │   ├── model_autoencoder.tflite
+│   │   │   ├── model_classifier.tflite
+│   │   │   ├── scaler.joblib
+│   │   │   └── VERSION
+│   │   └── temp_models_download/
+│   └── scripts/
+│       ├── create_gcs_bucket.sh
+│       ├── setup_cron_update_models.sh
+│       └── setup_cron_upload_data_to_gcs.sh
+├── hardware/
+│   └── arduino_code/
+│       └── sensors/
+│           └── sensors.ino
+├── .gitignore
+├── LICENSE
+├── README.md
+└── requirements.txt
+```
 
 ### 📄 License
 
 This project is not yet licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
+
