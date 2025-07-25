@@ -1,0 +1,83 @@
+gcp_project_id: "tractor-health-monitoring-k19"
+gcp_region: "us-central1"             
+
+gcs:
+  raw_data_bucket: "tractor-health-monitoring-raw-data-bucket"        
+  raw_data_prefix: "raw/"                             # The folder where edge devices upload
+  models_bucket: "tractor-health-monitoring-models-bucket"        
+  models_latest_prefix: "models/latest/"              # Where the latest TFLite models are symlinked/copied for edge
+  models_versioned_prefix: "models/versions/"         # Where the pipeline stores all historical model versions
+  pipeline_artifacts_bucket: "tractor-health-monitoring-kfp-pipeline-artifacts" # Bucket for pipeline intermediate outputs and logs
+
+bigquery:
+  dataset_id: "tractor_health_monitoring_dataset"                   # BigQuery Dataset ID
+  table_id: "sensor_can_readings"                         # BigQuery Table ID for consolidated data
+
+vertex_ai_pipelines:
+  pipeline_name: "tractor-health-monitoring-end-to-end-automated-pipeline"      
+  endpoint_display_name: "tractor-health-monitoring-endpoint"
+  pipeline_description: "End-to-end ML pipeline for tractor health monitoring: ingestion, preprocessing, training, deployment"
+  compiled_pipeline_output_file: "end_to_end_automated_pipeline.json"
+
+artifact_registry:
+  repository_name: "tractor-health-monitoring-mlops-images"         
+
+model_training_params:
+  autoencoder:
+    epochs: 50                                        
+    batch_size: 32                                    
+    learning_rate_choices: 0.01, 0.001, 0.0001
+    anomaly_threshold_factor: 3.0                     
+    tuner_max_trials: 5
+    tuner_executions_per_trial: 1
+    tuner_lstm_units_choices: 32, 64
+    tuner_dropout_min: 0.0
+    tuner_dropout_max: 0.5
+    tuner_dropout_step: 0.1
+  classifier:
+    epochs: 100                                       
+    batch_size: 64                                    
+    learning_rate_min: 0.0001                           
+    learning_rate_max: 0.01
+    num_classes : 16
+    tuner_max_trials: 10
+    tuner_executions_per_trial: 1
+    tuner_num_conv_layers_min: 1
+    tuner_num_conv_layers_max: 2
+    tuner_filters_choices: 32, 64
+    tuner_units_min: 32
+    tuner_units_max: 256
+    tuner_units_step: 32
+    tuner_dropout_min: 0.0
+    tuner_dropout_min: 0.5
+    tuner_dropout_min:  0.1
+  evaluation_thresholds:
+    min_classifier_accuracy: 0.85                     # Minimum accuracy required for classifier model deployment
+    min_classifier_f1_score: 0.80                     # Minimum F1-score required for classifier model deployment
+    max_autoencoder_fpr: 0.01                         # Maximum False Positive Rate for anomaly detection (for evaluation)
+
+data_preparation_params:
+  feature_columns:                                    # List of all feature columns to be used for ML training, consistent with edge
+    - "engine_temp_C"
+    - "front_brake_temp_C"
+    - "rear_brake_temp_C"
+    - "transmission_temp_C"
+    - "alternator_temp_C"
+    - "clutch_temp_C"
+    - "hydraulic_level_pct"
+    - "transmission_level_pct"
+    - "cabin_vibration_x"
+    - "cabin_vibration_y"
+    - "cabin_vibration_z"
+    - "frame_vibration_x"
+    - "frame_vibration_y"
+    - "frame_vibration_z"
+    - "engine_coolant_temp_C"
+    - "engine_rpm"
+    - "fuel_temp_C"
+  train_split_ratio: 0.7                              
+  validation_split_ratio: 0.15                        
+  test_split_ratio: 0.15                              
+  rolling_window: 5                              
+  sequence_length: 5                              # For LSTM Windowing
+  

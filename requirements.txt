@@ -1,0 +1,30 @@
+# Install requirements on RaspberryPi
+# Scientific computing and data processing
+numpy
+pandas
+joblib
+scikit-learn
+
+# Google Cloud Pub/Sub
+google-cloud-pubsub
+google-cloud-aiplatform
+google-cloud-storage
+kfp
+
+# TensorFlow and  TensorFlow Lite for inference
+tensorflow
+tflite-runtime
+
+# Optional for Serial and CAN communication
+pyserial
+python-can
+python-j1939
+
+# For date parsing and timezone handling if needed
+python-dateutil
+
+# GUI
+PyQt5
+
+# For using PyYAML for configuration
+PyYAML

@@ -1,0 +1,500 @@
+# core_utilities/preprocess.py
+import os
+import argparse
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+import tensorflow as tf # For GCS file access
+import yaml
+import joblib
+
+
+
+# --- Function to load cloud_settings.yaml ---
+def load_cloud_settings():
+    """
+    Loads configuration settings from the cloud_settings.yaml file.
+    Assumes cloud_settings.yaml is in the 'config' directory at the project root.
+    """
+    # Get the directory of the current script (preprocess.py is in 'core_utilities/')
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    # Go up one level (..) from 'core_utilities' to the project root, then into 'config'
+    CONFIG_DIR = os.path.join(BASE_DIR, "..", "config")
+    CLOUD_SETTINGS_FILE_PATH = os.path.join(CONFIG_DIR, "cloud_settings.yaml")
+
+    try:
+        with open(CLOUD_SETTINGS_FILE_PATH, 'r') as f:
+            settings = yaml.safe_load(f)
+        print(f"[Preprocess:Settings] Loaded cloud settings from {CLOUD_SETTINGS_FILE_PATH}")
+        return settings
+    except FileNotFoundError:
+        print(f"[Preprocess:Settings] ERROR: cloud_settings.yaml not found at {CLOUD_SETTINGS_FILE_PATH}. Exiting.")
+        exit(1) # Critical error, cannot proceed without cloud settings
+    except yaml.YAMLError as e:
+        print(f"[Preprocess:Settings] ERROR: Could not decode YAML from {CLOUD_SETTINGS_FILE_PATH}. Check file format. Error: {e}")
+        exit(1) # Critical error
+
+# Load cloud settings once when the module is imported
+CLOUD_SETTINGS = load_cloud_settings()
+
+# --- Configuration (loaded from CLOUD_SETTINGS) ---
+# Feature columns list, dynamically loaded
+EXPECTED_FEATURE_COLS = CLOUD_SETTINGS['data_preparation_params']['feature_columns']
+ROLLING_WINDOW = CLOUD_SETTINGS['data_preparation_params']['rolling_window']
+SEQUENCE_LENGTH = CLOUD_SETTINGS['data_preparation_params']['sequence_length']
+TRAIN_RATIO = cloud_settings['data_preparation_params']['train_split_ratio']
+VAL_RATIO = cloud_settings['data_preparation_params']['validation_split_ratio']
+TEST_RATIO = cloud_settings['data_preparation_params']['test_split_ratio']
+
+
+# -----------------------------
+# Load CSV from GCS or local path
+# -----------------------------
+def load_csv(path):
+    """
+    Loads a CSV file from a given path.
+    Supports both GCS paths (gs://) and local file paths.
+    """
+    if path.startswith("gs://"):
+        # Uses TensorFlow's gfile for GCS access.
+        with tf.io.gfile.GFile(path, "r") as f:
+            df = pd.read_csv(f)
+    else:
+        # Loads from a local file path.
+        df = pd.read_csv(path)
+    return df
+    
+# -----------------------------
+# Save DataFrame to GCS or local path
+# -----------------------------
+def save_csv(df, path):
+    """
+    Saves a DataFrame to a CSV file at a given path.
+    Supports both GCS paths (gs://) and local file paths.
+    """
+    if path.startswith("gs://"):
+        # Uses TensorFlow's gfile for GCS access.
+        # Ensure directory exists for local file path
+        dir_name = os.path.dirname(path)
+        if not dir_name.startswith("gs://") and dir_name: # Only create local dirs
+            os.makedirs(dir_name, exist_ok=True)
+        with tf.io.gfile.GFile(path, "w") as f:
+            df.to_csv(f, index=False)
+            
+        
+    else:
+        # Saves to a local file path.
+        os.makedirs(os.path.dirname(path), exist_ok=True) # Ensure local directory exists
+        df.to_csv(path, index=False)
+
+# -----------------------------
+# Feature engineering and labeling
+# -----------------------------
+def feature_engineering(df, rolling_window):
+    """
+    Applies rolling mean, rolling standard deviation, and delta features
+    to specified numerical columns in the DataFrame.
+    """
+    base_rolling_cols = [
+        "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alternator_temp_C", "clutch_temp_C",
+        "hydraulic_level_pct", "transmission_level_pct", "cabin_acX", "cabin_acY", "cabin_acZ",
+        "body_frame_abX", "body_frame_abY", "body_frame_abZ", "engine_coolant_temp_C",
+        "engine_rpm", "fuel_temp_C"
+    ]
+    
+    # Filter for columns that actually exist in the DataFrame being processed
+    existing_base_cols = [col for col in base_rolling_cols if col in df.columns]
+
+    for col in existing_base_cols:
+        # Ensure column is numeric, coerce errors to NaN and then fill for rolling ops
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[f"{col}_roll_mean_{rolling_window}"] = df[col].rolling(window=rolling_window, min_periods=1).mean()
+        df[f"{col}_roll_std_{rolling_window}"] = df[col].rolling(window=rolling_window, min_periods=1).std().fillna(0) # Fill NaN std with 0
+
+    for col in existing_base_cols:
+        df[f"{col}_delta"] = df[col] - df[col].shift(1)
+
+    # Fill NaNs created by rolling/delta operations, typically 0 for first values
+    df = df.fillna(0) # Consistent with edge preprocessing
+
+    return df
+    
+FAULT_CLASS_MAP = {
+    0: "Healthy",
+    1: "Overheated Front Brakes",
+    2: "Overheated Rear Brakes",
+    3: "Low Hydraulic Oil level",
+    4: "Too high Hydraulic Oil level",
+    5: "Low Transmission Oil level",
+    6: "Too high Transmission Oil level",
+    7: "Vibration Issue",
+    8: "Clutch Failure",
+    9: "Transmission Overheat",
+    10: "Engine Overheat",
+    11: "Alternator Overheat",
+    12: "Clutch Overheat",
+    13: "Engine Coolant Overheat",
+    14: "Engine RPM Failure",
+    15: "Fuel Overheat"
+}
+    
+def generate_labels(df):
+    """
+    Generates 'fault_label' for a DataFrame based on predefined thresholds
+    for various sensor readings. This function simulates the process of
+    creating ground truth labels for supervised learning, assuming that
+    a single dominant fault is assigned if multiple conditions are met
+    (last condition applied takes precedence).
+
+    Args:
+        df (pd.DataFrame): DataFrame containing sensor data. Expected columns
+                           include temperature readings (e.g., '_temp_C'),
+                           level percentages (e.g., '_level_pct'),
+                           and vibration axes (e.g., '_vibration_x/y/z').
+
+    Returns:
+        pd.DataFrame: DataFrame with an added 'fault_label' column.
+    """
+    # Initialize all labels to 0 (Healthy).
+    df['fault_label'] = 0
+
+    # --- Temperature-related faults ---
+    # Overheated Front Brakes (Label 1)
+    # Threshold: Example > 80°C
+    # (Note: check engineering specifications or historical data analysis.)
+    if 'front_brake_temp_C' in df.columns:
+        df.loc[df['front_brake_temp_C'] > 80, 'fault_label'] = 1
+
+    # Overheated Rear Brakes (Label 2)
+    # Threshold: Example > 80°C.
+    if 'rear_brake_temp_C' in df.columns:
+        df.loc[df['rear_brake_temp_C'] > 80, 'fault_label'] = 2
+
+    # Transmission Overheat (Label 9)
+    # Threshold: Example > 100°C.
+    if 'transmission_temp_C' in df.columns:
+        df.loc[df['transmission_temp_C'] > 100, 'fault_label'] = 9
+
+    # Engine Overheat (Label 10)
+    # Threshold: Example > 95°C.
+    if 'engine_temp_C' in df.columns:
+        df.loc[df['engine_temp_C'] > 95, 'fault_label'] = 10
+
+    # Alternator Overheat (Label 11)
+    # Threshold: Example > 80°C.
+    if 'alternator_temp_C' in df.columns:
+        df.loc[df['alternator_temp_C'] > 80, 'fault_label'] = 11
+
+    # Clutch Overheat (Label 12)
+    # Threshold: Example > 120°C.
+    if 'clutch_temp_C' in df.columns:
+        df.loc[df['clutch_temp_C'] > 120, 'fault_label'] = 12
+
+    # Engine Coolant Overheat (Label 13)
+    # Threshold: Example > 90°C.
+    if 'engine_coolant_temp_C' in df.columns:
+        df.loc[df['engine_coolant_temp_C'] > 90, 'fault_label'] = 13
+
+    # Fuel Overheat (Label 15)
+    # Threshold: Example > 60°C.
+    if 'fuel_temp_C' in df.columns:
+        df.loc[df['fuel_temp_C'] > 60, 'fault_label'] = 15
+
+    # --- Fluid Level faults ---
+    # Low Hydraulic Oil level (Label 3)
+    # Threshold: Example < 20%.
+    if 'hydraulic_level_pct' in df.columns:
+        df.loc[df['hydraulic_level_pct'] < 20, 'fault_label'] = 3
+
+    # Too high Hydraulic Oil level (Label 4)
+    # Threshold: Example > 95%.
+    if 'hydraulic_level_pct' in df.columns:
+        df.loc[df['hydraulic_level_pct'] > 95, 'fault_label'] = 4
+
+    # Low Transmission Oil level (Label 5)
+    # Threshold: Example < 20%.
+    if 'transmission_level_pct' in df.columns:
+        df.loc[df['transmission_level_pct'] < 20, 'fault_label'] = 5
+
+    # Too high Transmission Oil level (Label 6)
+    # Threshold: Example > 95%.
+    if 'transmission_level_pct' in df.columns:
+        df.loc[df['transmission_level_pct'] > 95, 'fault_label'] = 6
+
+    # --- Vibration Issue (Label 7) ---
+    # Check if any of the specified vibration axes exceed a threshold.
+    # Threshold: Example > 0.5 (assuming normalized vibration magnitude or amplitude).
+    # Future Note: use RMS or frequency analysis.
+    vibration_cols = [
+        'cabin_vibration_x', 'cabin_vibration_y', 'cabin_vibration_z',
+        'frame_vibration_x', 'frame_vibration_y', 'frame_vibration_z'
+    ]
+    # Filter for columns that actually exist in the DataFrame
+    existing_vibration_cols = [col for col in vibration_cols if col in df.columns]
+
+    if existing_vibration_cols:
+        # Apply the vibration fault if ANY of the relevant vibration axes are high
+        # Using .any(axis=1) to check if any condition is true across the selected columns for each row.
+        df.loc[(df[existing_vibration_cols] > 0.5).any(axis=1), 'fault_label'] = 7
+
+    # --- Engine RPM Failure (Label 14) ---
+    # This fault typically involves abnormal RPM values (too low at load, too high at idle, or erratic).
+    # For this simple rule-based labeling, thresholds is defined for abnormally low or high RPM
+    # that are outside typical operating ranges.
+    # Example: RPM below 800 (stalling/very low idle) or above 2500 (over-revving)
+    if 'engine_rpm' in df.columns:
+        # Threshold considered for typical operating RPM range is 800-2200 for a tractor
+        df.loc[(df['engine_rpm'] < 800) | (df['engine_rpm'] > 2200), 'fault_label'] = 14
+
+
+    # Note on "Clutch Failure" (Label 8) and "Engine RPM Failure" (Label 14 in map,
+    # but 13 is Engine Coolant Overheat).
+    # "Clutch Failure" (Label 8) typically requires more complex diagnostic logic
+    # or machine learning models that go beyond simple thresholding of individual sensors.
+    # Future Note: Derive nuanced labeled data from expert analysis and specific
+    # diagnostic events, rather than simple rule-based labeling.
+    
+    if 'clutch_slip_ratio' in df.columns and df['clutch_slip_ratio'] > 0.1:
+        df.loc[df['clutch_slip_ratio'] > 0.1, 'fault_label'] = 8
+
+    return df
+
+def create_sequences(features_df: pd.DataFrame, labels_series: pd.Series, sequence_length: int):
+    """
+    Transforms a DataFrame of features and Series of labels into sequences
+    suitable for LSTM models.
+
+    Args:
+        features_df (pd.DataFrame): DataFrame of features (already scaled and engineered).
+        labels_series (pd.Series): Series of corresponding labels.
+        sequence_length (int): The number of time steps in each sequence.
+
+    Returns:
+        tuple: (X_sequences (np.array 3D), y_sequence_labels (np.array 1D))
+    """
+    X_sequences, y_sequence_labels = [], []
+    num_features = features_df.shape[1] # Number of features per timestep
+
+    for i in range(len(features_df) - sequence_length + 1):
+        # Extract a sequence of 'sequence_length' time steps
+        sequence = features_df.iloc[i:(i + sequence_length)].values
+        X_sequences.append(sequence)
+
+        # For classification, the label typically corresponds to the *last*
+        # time step in the sequence.
+        y_sequence_labels.append(labels_series.iloc[i + sequence_length - 1])
+
+    return np.array(X_sequences), np.array(y_sequence_labels)
+
+
+def train_val_test_data_split(X: np.ndarray, y: np.ndarray, train_ratio: float, val_ratio: float, test_ratio: float):
+    """
+    Splits the the 3D feature array (X) and 1D label array (y) into training,
+    validation, and testing sets, maintaining label distribution.
+    
+    
+    Args:
+        X (np.ndarray): 3D NumPy array of features (samples, timesteps, features).
+        y (np.ndarray): 1D NumPy array of corresponding labels.
+        train_ratio (float): Proportion of the dataset to include in the train split.
+        val_ratio (float): Proportion of the dataset to include in the validation split.
+        test_ratio (float): Proportion of the dataset to include in the test split.
+
+    Returns:
+        tuple: (X_train, X_val, X_test, y_train, y_val, y_test)
+    """    
+    # First split: Train + Val vs Test
+    # stratify on y for balanced classes
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=test_ratio, random_state=42, stratify=y
+    )
+
+    # Second split: Train vs Val from the X_train_val set
+    # Calculate new validation ratio relative to the remaining data
+    relative_val_ratio = val_ratio / (train_ratio + val_ratio)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=relative_val_ratio, random_state=42, stratify=y_train_val
+    )
+
+    print(f"Train samples: {len(X_train)}, Validation samples: {len(X_val)}, Test samples: {len(X_test)}")
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+# -----------------------------
+# Main preprocess function
+# -----------------------------
+def preprocess(input_csv_path):
+    """
+    Main preprocessing function. Loads data, cleans, engineers features,
+    generates labels, scales features, and returns the processed DataFrame and scaler.
+    
+    Args:
+        input_csv_path (str): Path to the raw input CSV data (GCS or local).
+
+    Returns:
+        tuple: (processed_df, scaler, X_train, X_val, X_test, y_train, y_val, y_test)
+    """
+    df = load_csv(input_csv_path) # Loads data from the specified input path.
+    if 'timestamp' in df.columns:
+        # Ensure timestamp is treated as datetime and sorted for rolling/sequencing
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+        df = df.sort_values(by='timestamp').reset_index(drop=True)
+    else:
+        print("[Preprocess] Warning: 'timestamp' column not found or invalid. Data will not be sorted by time.")
+
+    # Data parsing based on source (serial or CAN)
+    serial_mask = df['source'] == 'serial'
+    can_mask = df['source'] == 'can'
+
+    # Define all possible serial columns based on Arduino output, and convert them to proper types
+    serial_cols_expected_from_arduino = [
+        "timestamp_ms", "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alternator_temp_C",
+        "clutch_temp_C", "hydraulic_level_pct", "transmission_level_pct", "cabin_vibration_x", "cabin_vibration_y",
+        "cabin_vibration_z", "frame_vibration_x", "frame_vibration_y", "frame_vibration_z"
+    ]
+
+    # Parses serial data strings into numerical columns. (defined locally for scope)
+    def parse_serial_data_row(row):
+        try:
+            # Use 'data' column which contains the raw serial string from data_collect.py
+            data_str = str(row['data'])
+            values = data_str.split(',')
+            if len(values) != len(serial_cols_expected_from_arduino):
+                print(f"[Preprocess] Warning: Serial data row length mismatch. Expected {len(serial_cols_expected_from_arduino)}, got {len(values)} for row data '{data_str[:50]}...'. Filling with NaN.")
+                return pd.Series([np.nan]*len(serial_cols_expected_from_arduino), index=serial_cols_expected_from_arduino)
+            return pd.Series(pd.to_numeric(values, errors='coerce'), index=serial_cols_expected_from_arduino)
+        except Exception as e:
+            print(f"[Preprocess] Error parsing serial data row: {e}, Raw data: '{row.get('data', '')[:50]}...'")
+            return pd.Series([np.nan]*len(serial_cols_expected_from_arduino), index=serial_cols_expected_from_arduino)
+
+    # Apply parsing to serial-sourced rows and update original DataFrame
+    # Need to handle potential empty parsed_serial_df if serial_mask is all False
+    if not df[serial_mask].empty:
+        parsed_serial_df = df[serial_mask].apply(parse_serial_data_row, axis=1)
+        # Ensure all serial_cols_expected_from_arduino are in df, filling with NaN if not present
+        for col in serial_cols_expected_from_arduino:
+            df.loc[serial_mask, col] = parsed_serial_df[col]
+
+    # Define CAN numeric columns and ensure they are parsed to numeric
+    can_numeric_cols = ['engine_coolant_temp_C', 'engine_rpm', 'fuel_temp_C']
+    for col in can_numeric_cols:
+        df.loc[can_mask, col] = pd.to_numeric(df.loc[can_mask, col], errors='coerce')
+
+    # Combine all potential numeric columns from both serial and CAN sources  for median imputation
+    all_numeric_cols = list(set(serial_cols_expected_from_arduino + can_numeric_cols))
+    for col in all_numeric_cols:
+        if col in df.columns:
+            median_val = df[col].median()
+            if pd.isna(median_val):
+                median_val = 0 # Defaults to 0 if median is also NaN (e.g., all NaN column).
+            df[col].fillna(median_val, inplace=True)
+        else:
+            # If a column doesn't exist in df at all (e.g., no CAN data yet), add it with 0s/NaNs
+            df[col] = df.get(col, 0) # Use .get() to avoid KeyError if column doesn't exist yet
+            df[col].fillna(0, inplace=True) # Fill any NaNs in newly added column
+
+
+    # Converts categorical columns to numerical codes.
+    df['source'] = df['source'].astype('category').cat.codes
+    if 'id' in df.columns:
+        df['id'] = df['id'].fillna('none')
+        df['id'] = df['id'].astype('category').cat.codes
+    else:
+        df['id'] = -1 # Assign a default if 'id' column is completely missing
+
+
+    # Drops raw data columns not needed for modeling after parsing.
+    df.drop(columns=['data', 'raw_line', 'pgn'], inplace=True, errors='ignore')
+
+    # Apply feature engineering using the rolling window from settings
+    df = feature_engineering(df, ROLLING_WINDOW) # Applies feature engineering.
+    df = generate_labels(df)     # Generates fault labels.
+
+    # Selects and orders features consistently with the EXPECTED_FEATURE_COLS from settings.
+    # This is crucial for model input consistency and for scaling.
+    final_features_df = df[EXPECTED_FEATURE_COLS].copy()
+
+    # Scales numerical features using MinMaxScaler.
+    scaler = MinMaxScaler()
+    final_features_df[EXPECTED_FEATURE_COLS] = scaler.fit_transform(final_features_df[EXPECTED_FEATURE_COLS])
+    print(f"[Preprocess] Features scaled. Shape: {final_features_df.shape}")
+
+    # The 'features' for sequence creation are the 'final_features_df' (2D: samples x features).
+    # The 'labels' are 'df['fault_label']' (1D).
+    X_sequences_full, y_sequences_full = create_sequences(
+        final_features_df,
+        df['fault_label'],
+        sequence_length=SEQUENCE_LENGTH
+    )
+    print(f"[Preprocess] Data converted to sequences. Final shape for ML: {X_sequences_full.shape}")
+
+
+    # Splits the SEQUENCED data into training, validation, and testing sets.
+    train_ratio = TRAIN_RATIO
+    val_ratio = VAL_RATIO
+    test_ratio = TEST_RATIO
+
+    X_train, X_val, X_test, y_train, y_val, y_test = train_val_test_data_split(
+        X_sequences_full, y_sequences_full, train_ratio, val_ratio, test_ratio
+    )
+    
+    # Combine features and labels for splitting
+    processed_df_final = pd.concat([final_features_df, df[['fault_label']]], axis=1)
+
+
+    return processed_df_final, scaler, X_train, X_val, X_test, y_train, y_val, y_test
+
+
+# -----------------------------
+# Command-line execution for the script (for use in Docker container)
+# -----------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Data Preprocessing Script")
+    parser.add_argument("--input", type=str, required=True, help="Path to the raw input CSV data.")
+    parser.add_argument("--train_output", type=str, required=True, help="Path to save the preprocessed training data NPY.")
+    parser.add_argument("--train_labels_output", type=str, required=True, help="Path to save the preprocessed training data NPY.")
+    parser.add_argument("--val_output", type=str, required=True, help="Path to save the preprocessed validation data NPY.")
+    parser.add_argument("--val_labels_output", type=str, required=True, help="Path to save the preprocessed validation data NPY.")    
+    parser.add_argument("--test_output", type=str, required=True, help="Path to save the preprocessed testing data NPY.")
+    parser.add_argument("--test_labels_output", type=str, required=True, help="Path to save the preprocessed testing data NPY.")
+    parser.add_argument("--scaler_output", type=str, required=True, help="Path to save the fitted MinMaxScaler.")
+    parser.add_argument("--preprocessed_full_output", type=str, required=False, help="Optional: Path to save the full preprocessed data CSV.")
+
+    args = parser.parse_args()
+
+    print(f"[Preprocessing] Loading data from {args.input}...")
+    #processed_df, scaler, X_train, X_val, X_test, y_train, y_val, y_test = preprocess(args.input)
+    processed_df_2d, scaler, X_train_3d, X_val_3d, X_test_3d, y_train_1d, y_val_1d, y_test_1d = preprocess(args.input)
+
+    # Save the scaler
+    joblib.dump(scaler, args.scaler_output)
+    print(f"[Preprocessing] Scaler saved to {args.scaler_output}")
+
+    # Saves the training, validation, and testing splits (as NumPy binary files (.npy))
+    train_output_npy = args.train_output.replace('.csv', '.npy') # Ensure .npy extension
+    val_output_npy = args.val_output.replace('.csv', '.npy')
+    test_output_npy = args.test_output.replace('.csv', '.npy')
+    
+    train_labels_output_npy = train_output_npy.replace('.npy', '_labels.npy')
+    val_labels_output_npy = val_output_npy.replace('.npy', '_labels.npy')
+    test_labels_output_npy = test_output_npy.replace('.npy', '_labels.npy')
+
+    np.save(args.train_output, X_train_3d)
+    np.save(args.train_labels_output, y_train_1d)
+    np.save(args.val_output, X_val_3d)
+    np.save(args.val_labels_output, y_val_1d)
+    np.save(args.test_output, X_test_3d)
+    np.save(args.test_labels_output, y_test_1d)
+
+    print(f"[Preprocessing] Train features (3D Numpy) saved to {args.train_output}")
+    print(f"[Preprocessing] Train labels (1D Numpy) saved to {args.train_labels_output}")
+    print(f"[Preprocessing] Validation features (3D Numpy) saved to {args.val_output}")
+    print(f"[Preprocessing] Validation labels (1D Numpy) saved to {args.val_labels_output}")
+    print(f"[Preprocessing] Test features (3D Numpy) saved to {args.test_output}")
+    print(f"[Preprocessing] Test labels (1D Numpy) saved to {args.test_labels_output}")
+
+    # Saves the full preprocessed data if an output path is provided.
+    if args.preprocessed_full_output:
+        save_csv(processed_df_2d, args.preprocessed_full_output)
+        print(f"[Preprocessing] Full 2D preprocessed data saved to {args.preprocessed_full_output}")

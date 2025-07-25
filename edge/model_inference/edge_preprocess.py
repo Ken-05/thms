@@ -1,0 +1,268 @@
+# edge_preprocess.py
+
+import pandas as pd
+import numpy as np
+import joblib # For loading the pre-trained scaler
+import os
+import json
+
+
+# --- Function to load settings from settings.json ---
+def load_settings():
+    """
+    Loads configuration settings from the settings.json file.
+    Assumes settings.json is in the 'config' directory one level from this file.
+    """
+    # Get the directory of the current script 
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    # Go up one level and then into 'config'
+    CONFIG_DIR = os.path.join(BASE_DIR, "..", "config")
+    SETTINGS_FILE_PATH = os.path.join(CONFIG_DIR, "settings.json")
+
+    try:
+        with open(SETTINGS_FILE_PATH, 'r') as f:
+            settings = json.load(f)
+        print(f"[EdgePreprocess:Settings] Loaded settings from {SETTINGS_FILE_PATH}")
+        return settings
+    except FileNotFoundError:
+        print(f"[EdgePreprocess:Settings] ERROR: settings.json not found at {SETTINGS_FILE_PATH}. Ensure it's deployed.")
+        exit(1) # Critical error, cannot proceed without settings
+    except json.JSONDecodeError:
+        print(f"[EdgePreprocess:Settings] ERROR: Could not decode JSON from {SETTINGS_FILE_PATH}. Check file format.")
+        exit(1) # Critical error
+
+# Load settings once when the module is imported
+SETTINGS = load_settings()
+
+# ----------------------
+# Configuration (loaded from SETTINGS)
+# ----------------------
+MODELS_BASE_DIR = SETTINGS['inference']['model_dir']
+ROLLING_WINDOW = SETTINGS['inference']['rolling_window']
+
+# Global scaler variable
+edge_scaler = None
+
+# ----------------------
+# Scaler Loading Function
+# ----------------------
+def load_scaler(model_dir):
+    """
+    Loads the pre-trained MinMaxScaler from the specified model directory.
+    This function is designed to be called when the scaler needs to be reloaded.
+    """
+    global edge_scaler # Declare intent to modify the global variable
+
+    scaler_filename = SETTINGS['inference']['scaler_params_filename']
+    # Construct the full path to the scaler file
+    # Go up one level (..) , then into 'models/current_model/'
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    scaler_path = os.path.join(BASE_DIR, "..", model_dir, scaler_filename)
+
+    try:
+        edge_scaler = joblib.load(scaler_path)
+        print(f"[EdgePreprocess] Scaler loaded from {scaler_path}")
+    except FileNotFoundError:
+        print(f"[EdgePreprocess] ERROR: Scaler file not found at {scaler_path}. Ensure it's deployed.")
+        edge_scaler = None
+    except Exception as e:
+        print(f"[EdgePreprocess] ERROR loading scaler from {scaler_path}: {e}")
+        edge_scaler = None
+
+# Call the scaler loading function once when the module is first imported
+# Pass the relative model_dir from settings
+load_scaler(MODELS_BASE_DIR)
+
+
+def feature_engineering(df, rolling_window = ROLLING_WINDOW):
+    """
+    Applies rolling mean, rolling standard deviation, and delta features
+    to specified numerical columns in the DataFrame.
+    """
+    
+    # These are the base columns from which rolling features will be generated.
+    # This list should be consistent with the raw data collected and it is expected by models.
+    rolling_cols = [
+        "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alt_temp_C", "clutch_temp_C",
+        "hydraulic_level_pct", "transmission_level", "cabin_acX", "cabin_acY", "cabin_acZ",
+        "body_frame_abX", "body_frame_abY", "body_frame_abZ", "engine_coolant_temp_C",
+        "engine_rpm", "fuel_temp_C"
+    ]
+    
+    # Filter for columns that actually exist in the DataFrame being processed
+    existing_base_cols = [col for col in base_rolling_cols if col in df.columns]
+    
+    for col in existing_base_cols:
+        # Ensure column is numeric, coerce errors to NaN and then fill for rolling ops
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[f"{col}_roll_mean_{rolling_window}"] = df[col].rolling(window=rolling_window, min_periods=1).mean()
+        df[f"{col}_roll_std_{rolling_window}"] = df[col].rolling(window=rolling_window, min_periods=1).std().fillna(0) # Fill NaN std with 0
+
+    for col in existing_base_cols:
+        df[f"{col}_delta"] = df[col] - df[col].shift(1)
+
+    # Fill NaNs created by rolling/delta operations, typically 0 for first values
+    # or if a column was entirely missing from the input.
+    # This should match cloud training preprocessing.
+    df = df.fillna(0)
+
+    return df
+    
+
+def parse_raw_serial_data(raw_line):
+    """
+    Parses a raw serial data string into a dictionary of sensor values.
+    """
+    # Define expected order of serial columns. Should match Arduino output.
+    serial_cols = [
+        "timestamp_ms", "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alt_temp_C",
+        "clutch_temp_C", "hydraulic_level_pct", "transmission_level", "cabin_acX", "cabin_acY",
+        "cabin_acZ", "body_frame_abX", "body_frame_abY", "body_frame_abZ"
+    ]
+    try:
+        values = raw_line.split(',')
+        if len(values) != len(serial_cols):
+            print(f"[EdgePreprocess] Warning: Serial data length mismatch. Expected {len(serial_cols)}, got {len(values)}.")
+            return {col: np.nan for col in serial_cols} # Return NaNs for all
+        
+        parsed_data = {}
+        for i, col in enumerate(serial_cols):
+            try:
+                # Convert to numeric, coercing errors to NaN
+                parsed_data[col] = pd.to_numeric(values[i], errors='coerce')
+            except ValueError:
+                parsed_data[col] = np.nan # Should be caught by pd.to_numeric(errors='coerce') but as fallback
+        return parsed_data
+    except Exception as e:
+        print(f"[EdgePreprocess] Error parsing serial data: {e}, Raw line: '{raw_line}'")
+        return {col: np.nan for col in serial_cols} # Return NaNs on error
+
+def parse_raw_can_data(decoded_can_data):
+    """
+    Parses decoded CAN bus data (from J1939Decoder) into a dictionary of sensor values.
+    Ensures all expected CAN-derived features are present, filling missing with NaN.
+    """
+    # These are the specific CAN data fields expected from J1939Decoder right now
+    # Future Note: collect more CAN data and populate more CAN data fields
+    can_expected_cols = ['engine_coolant_temp_C', 'engine_rpm', 'fuel_temp_C']
+    parsed_data = {}
+    for col in can_expected_cols:
+        parsed_data[col] = pd.to_numeric(decoded_can_data.get(col, np.nan), errors='coerce')
+    return parsed_data
+
+def process_single_sample(rolling_buffer_df, model_dir):
+    """
+    Preprocesses a single raw data item for real-time inference.
+    It integrates with a rolling buffer to calculate time-series features scales the data..
+    
+    Args:
+        rolling_buffer_df (pd.DataFrame): The current rolling buffer of historical data.
+                                         This is managed by the calling thread (InferenceRunner).
+                                         This DataFrame should already contain the latest raw sample.
+        model_dir (str): The relative path to the directory containing the scaler file.             
+
+    Returns:
+        np.array: A 2D numpy array (1, num_features) of the preprocessed and scaled data,
+                  or None if preprocessing fails or data is insufficient.
+    """
+    # Reload scaler in case it was updated (data_collect.py restarts this module)
+    load_scaler(model_dir)
+    
+    if edge_scaler is None:
+        print("[EdgePreprocess] Scaler not loaded. Cannot preprocess data.")
+        return None
+
+
+    # Step 1: Apply feature engineering to the entire rolling buffer
+    # This creates the rolling features based on the historical context.
+    processed_df_with_features = feature_engineering(rolling_buffer_df.copy(), rolling_window=ROLLING_WINDOW)
+
+    # Get the latest row with all features, including engineered ones.
+    # This row will have NaNs for rolling features if the buffer is too small (min_periods not met).
+    latest_row_processed = processed_df_with_features.iloc[[-1]]
+
+    # Step 2: Select and order features consistently with training data
+    # Ensure all EXPECTED_FEATURE_COLS are present, filling with 0 or NaN if missing.
+    # This creates a new DataFrame with the correct columns and order.
+    features_for_scaling = pd.DataFrame(columns=EXPECTED_FEATURE_COLS)
+    for col in EXPECTED_FEATURE_COLS:
+        if col in latest_row_processed.columns:
+            features_for_scaling[col] = latest_row_processed[col].values 
+        else:
+            features_for_scaling[col] = 0.0 # Fill with 0.0 if column is missing (matches common training practice)
+
+    # Step 3: Handle any remaining NaNs (e.g., from rolling features when min_periods not met)
+    # This should be consistent with how NaNs were handled in the training pipeline.
+    features_for_scaling = features_for_scaling.fillna(0.0) # Fill any remaining NaNs with 0
+
+    # Ensure the DataFrame is not empty after all processing
+    if features_for_scaling.empty:
+        print("[EdgePreprocess] Features DataFrame is empty after processing. Cannot scale.")
+        return None
+
+    # Step 4: Scale the features using the pre-loaded scaler
+    # The scaler expects a 2D array, even for a single sample (1, num_features)
+    scaled_features = edge_scaler.transform(features_for_scaling)
+
+    # Ensure the output is float32 as expected by TFLite models
+    return scaled_features.astype(np.float32)
+        
+
+# The __main__ block is for local testing of this module, [not for pipeline integration.]
+if __name__ == "__main__":
+    print("[EdgePreprocess] Running local test of preprocess_single_sample.")
+    from sklearn.preprocessing import MinMaxScaler # Import for dummy scaler
+
+    # Create a dummy scaler for local testing if the actual one isn't deployed
+    if edge_scaler is None:
+        print("[EdgePreprocess] Creating dummy scaler for local test.")
+        temp_scaler = MinMaxScaler()
+        # Create dummy data with the expected feature columns for fitting the scaler
+        dummy_data_for_scaler_fit = pd.DataFrame(np.random.rand(10, len(EXPECTED_FEATURE_COLS)), columns=EXPECTED_FEATURE_COLS)
+        temp_scaler.fit(dummy_data_for_scaler_fit)
+        edge_scaler = temp_scaler
+
+    # Simulate a rolling buffer (empty initially)
+    initial_raw_cols = [
+        "timestamp_ms", "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alternator_temp_C",
+        "clutch_temp_C", "hydraulic_level_pct", "transmission_level_pct", "cabin_vibration_x", "cabin_vibration_y",
+        "cabin_vibration_z", "frame_vibration_x", "frame_vibration_y", "frame_vibration_z",
+        "engine_coolant_temp_C", "engine_rpm", "fuel_temp_C"
+    ]
+    test_rolling_buffer = pd.DataFrame(columns=initial_raw_cols)
+
+    # Simulate incoming raw data items
+    sample_raw_serial = {"source": "serial", "data": "1000,85.5,30.1,28.9,40.0,50.2,75.0,10.0,0.1,0.2,0.3,1.0,2.0,3.0"}
+    sample_raw_can = {"source": "can", "decoded": {"engine_coolant_temp_C": 92.0, "engine_rpm": 1200.5, "fuel_temp_C": 45.1}}
+
+
+    # Simulate a few steps to build up the buffer for a more realistic test
+    print("\nBuilding up rolling buffer with simulated data for testing...")
+    current_rolling_buffer_for_test = pd.DataFrame(columns=initial_raw_cols)
+    rolling_window_for_test = ROLLING_WINDOW
+
+    for i in range(rolling_window_for_test + 2): # Add a couple extra to ensure full window
+        # Simulate a mix of serial and CAN data
+        if i % 2 == 0:
+            parsed_vals = parse_raw_serial_data(f"{int(time.time()*1000)},{np.random.uniform(70, 100):.1f},{np.random.uniform(20, 40):.1f},{np.random.uniform(20, 40):.1f},{np.random.uniform(30, 50):.1f},{np.random.uniform(40, 60):.1f},{np.random.uniform(60, 90):.1f},{np.random.uniform(5, 15):.1f},{np.random.uniform(-0.5, 0.5):.3f},{np.random.uniform(-0.5, 0.5):.3f},{np.random.uniform(-0.5, 0.5):.3f},{np.random.uniform(0.5, 1.5):.3f},{np.random.uniform(1.5, 2.5):.3f},{np.random.uniform(2.5, 3.5):.3f}")
+        else:
+            parsed_vals = parse_raw_can_data({"engine_coolant_temp_C": np.random.uniform(70, 100), "engine_rpm": np.random.uniform(500, 1500), "fuel_temp_C": np.random.uniform(30, 50)})
+
+        # Ensure all expected raw columns are present in parsed_vals, fill missing with NaN
+        for col in initial_raw_cols:
+            if col not in parsed_vals:
+                parsed_vals[col] = np.nan
+
+        current_rolling_buffer_for_test = pd.concat([current_rolling_buffer_for_test, pd.DataFrame([parsed_vals])], ignore_index=True)
+        if len(current_rolling_buffer_for_test) > rolling_window_for_test:
+            current_rolling_buffer_for_test = current_rolling_buffer_for_test.iloc[-rolling_window_for_test:].reset_index(drop=True)
+
+        print(f"Buffer size: {len(current_rolling_buffer_for_test)}")
+        # Now, call process_single_sample with the current state of the buffer
+        # Simulates how InferenceRunner would pass the buffer.
+        processed_data = process_single_sample(current_rolling_buffer_for_test.copy(), MODELS_BASE_DIR)
+        if processed_data is not None:
+            print(f"Sample {i+1} processed. Shape: {processed_data.shape}")
+        else:
+            print(f"Sample {i+1} failed preprocessing.")
+    

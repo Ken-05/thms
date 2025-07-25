@@ -1,0 +1,61 @@
+{
+  "data_collection": {
+    "arduino_serial_port": "/dev/ttyACM0",
+    "arduino_baud_rate": 115200,
+	"can_interface": "can0",
+	"can_bitrate": 250000,
+    "data_collection_interval_ms": 1000,
+    "combined_log_file_path": "data/combined_log.csv",
+	"systemd_service_name": "data_collect.service"
+  },
+  "inference": {
+    "model_dir": "models/current_models/",
+	"temp_model_dir": "models/temp_models_download/",
+    "autoencoder_filename": "autoencoder_tflite_model.tflite",
+    "classifier_filename": "classifier_tflite_model.tflite",
+    "scaler_params_filename": "scaler.joblib",
+    "anomaly_threshold": 0.05,         
+    "fault_confidence_threshold": 0.75, 
+    "status_output_file": "gui/latest_status.json",
+	"rolling_window": 5 
+  },
+  "cloud_sync": {
+    "gcs_raw_data_bucket": "tractor-health-monitoring-raw-data-bucket",
+    "gcs_raw_data_prefix": "raw/",
+    "gcs_models_bucket": "tractor-health-monitoring-models-bucket",
+    "gcs_models_prefix": "models/versions/",
+	"pubsub_topic": "tractor-health-stream",
+	"gcp_credentials_path_relative": "keys/gcp-service-account.json",
+    "model_check_interval_hours": 6,   
+    "data_upload_interval_hours": 24   
+  },
+  "logging": {
+    "app_log_file": "logs/app.log",
+    "inference_log_file": "logs/inference.log",
+    "log_level": "INFO"               
+  },
+  "data_preparation": {                                   
+    "feature_columns": [                                  
+        "engine_temp_C", "front_brake_temp_C", "rear_brake_temp_C", "alternator_temp_C", "clutch_temp_C",
+        "hydraulic_level_pct", "transmission_level_pct", "cabin_vibration_x", "cabin_vibration_y", "cabin_vibration_z",
+        "frame_vibration_x", "frame_vibration_y", "frame_vibration_z", "engine_coolant_temp_C",
+        "engine_rpm", "fuel_temp_C",
+        "engine_temp_C_roll_mean_5", "engine_temp_C_roll_std_5", "engine_temp_C_delta",
+        "front_brake_temp_C_roll_mean_5", "front_brake_temp_C_roll_std_5", "front_brake_temp_C_delta",
+        "rear_brake_temp_C_roll_mean_5", "rear_brake_temp_C_roll_std_5", "rear_brake_temp_C_delta",
+        "alternator_temp_C_roll_mean_5", "alternator_temp_C_roll_std_5", "alternator_temp_C_delta",
+        "clutch_temp_C_roll_mean_5", "clutch_temp_C_roll_std_5", "clutch_temp_C_delta",
+        "hydraulic_level_pct_roll_mean_5", "hydraulic_level_pct_roll_std_5", "hydraulic_level_pct_delta",
+        "transmission_level_pct_roll_mean_5", "transmission_level_pct_roll_std_5", "transmission_level_pct_delta",
+        "cabin_vibration_x_roll_mean_5", "cabin_vibration_x_roll_std_5", "cabin_vibration_x_delta",
+        "cabin_vibration_y_roll_mean_5", "cabin_vibration_y_roll_std_5", "cabin_vibration_y_delta",
+        "cabin_vibration_z_roll_mean_5", "cabin_vibration_z_roll_std_5", "cabin_vibration_z_delta",
+        "frame_vibration_x_roll_mean_5", "frame_vibration_x_roll_std_5", "frame_vibration_x_delta",
+        "frame_vibration_y_roll_mean_5", "frame_vibration_y_roll_std_5", "frame_vibration_y_delta",
+        "frame_vibration_z_roll_mean_5", "frame_vibration_z_roll_std_5", "frame_vibration_z_delta",
+        "engine_coolant_temp_C_roll_mean_5", "engine_coolant_temp_C_roll_std_5", "engine_coolant_temp_C_delta",
+        "engine_rpm_roll_mean_5", "engine_rpm_roll_std_5", "engine_rpm_delta",
+        "fuel_temp_C_roll_mean_5", "fuel_temp_C_roll_std_5", "fuel_temp_C_delta"
+    ]
+  }
+}

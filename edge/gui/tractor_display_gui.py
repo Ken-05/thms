@@ -1,0 +1,440 @@
+import sys
+import json
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel, QGridLayout, QFrame, QTimer
+)
+from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt
+
+
+# --- Function to load settings from settings.json ---
+def load_settings():
+    """
+    Loads configuration settings from the settings.json file.
+    Assumes settings.json is in the 'config' directory one level up from this file.
+    """
+    # Get the directory of the current script)
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    # Go up one level and then into 'config'
+    CONFIG_DIR = os.path.join(BASE_DIR, "..", "config")
+    SETTINGS_FILE_PATH = os.path.join(CONFIG_DIR, "settings.json")
+
+    try:
+        with open(SETTINGS_FILE_PATH, 'r') as f:
+            settings = json.load(f)
+        print(f"[GUI:Settings] Loaded settings from {SETTINGS_FILE_PATH}")
+        return settings
+    except FileNotFoundError:
+        print(f"[GUI:Settings] ERROR: settings.json not found at {SETTINGS_FILE_PATH}. GUI may not function correctly.")
+        # In a GUI, you might show a message box, but for now, print and return empty dict
+        return {}
+    except json.JSONDecodeError:
+        print(f"[GUI:Settings] ERROR: Could not decode JSON from {SETTINGS_FILE_PATH}. Check file format.")
+        return {}
+
+# Load settings once when the module is imported
+SETTINGS = load_settings()
+
+# Config (load from settings)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+STATUS_FILE = os.path.join(BASE_DIR, SETTINGS['inference']['status_output_file'])
+FAULT_CONFIDENCE_THRESHOLD = SETTINGS['inference']['fault_confidence_threshold']
+
+
+FAULT_CLASS_MAP = {
+    0: "Healthy",
+    1: "Overheated Front Brakes",
+    2: "Overheated Rear Brakes",
+    3: "Low Hydraulic Oil level",
+    4: "Too high Hydraulic Oil level",
+    5: "Low Transmission Oil level",
+    6: "Too high Transmission Oil level",
+    7: "Vibration Issue",
+    8: "Clutch Failure",
+    9: "Transmission Overheat",
+    10: "Engine Overheat",
+    11: "Alternator Overheat",
+    12: "Clutch Overheat",
+    13: "Engine Coolant Overheat",
+    14: "Engine RPM Failure",
+    15: "Fuel Overheat"
+}
+
+PART_MAP = {
+    "Overheated Front Brakes": "Front Brakes",
+    "Overheated Rear Brakes": "Rear Brakes",
+    "Low Hydraulic Oil level": "Hydraulic Tank",
+    "Too high Hydraulic Oil level": "Hydraulic Tank",
+    "Low Transmission Oil level": "Transmission Oil",
+    "Too high Transmission Oil level": "Transmission Oil",
+    "Vibration Issue": "Cabin Vibration",
+    "Clutch Failure": "Engine",
+    "Transmission Overheat": "Transmission",
+    "Engine Overheat": "Engine Compartment",
+    "Alternator Overheat": "Alternator",
+    "Clutch Overheat": "Clutch",
+    "Engine Coolant Overheat": "Engine Coolant",
+    "Engine Overheat": "Engine", 
+    "Fuel Overheat": "Fuel"
+    
+}
+
+
+class StatusCard(QFrame):
+    def __init__(self, title):
+        super().__init__()
+        self.setFrameShape(QFrame.Box)
+        self.setLineWidth(2)
+        self.setStyleSheet("background-color: #f0f0f0; border-radius: 10px;")
+        layout = QVBoxLayout()
+
+        self.title_label = QLabel(title)
+        self.title_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.title_label.setAlignment(Qt.AlignCenter)
+
+        self.status_label = QLabel("Waiting...")
+        self.status_label.setFont(QFont("Arial", 12))
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.status_label)
+        self.setLayout(layout)
+
+    def update_status(self, status_text, is_fault=False):
+        self.status_label.setText(status_text)
+        if is_fault:
+            self.setStyleSheet("background-color: #ffcccc; border-radius: 10px;")
+        elif status_text == "Normal":
+            self.setStyleSheet("background-color: #ccffcc; border-radius: 10px;")
+        else:
+            self.setStyleSheet("background-color: #f0f0f0; border-radius: 10px;")
+
+
+class TractorHealthGUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Tractor Health Dashboard")
+        self.setGeometry(100, 100, 800, 400)
+        self.setStyleSheet("background-color: #ffffff;")
+
+        layout = QVBoxLayout()
+        title = QLabel("Real-Time Tractor Health Monitoring")
+        title.setFont(QFont("Arial", 20, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        self.grid = QGridLayout()
+
+        # Define the main components to display on the GUI
+        self.components = {
+            "Engine": StatusCard("Engine"),
+            "Brakes": StatusCard("Brakes"),
+            "Hydraulic Oil": StatusCard("Hydraulic Oil"),
+            "Cabin Vibration": StatusCard("Cabin Vibration"),
+            "Transmission": StatusCard("Transmission")
+            # Future Note: add more components being monitored
+        }
+
+        positions = [(i, j) for i in range(2) for j in range(3)]
+        for pos, key in zip(positions, self.components):
+            self.grid.addWidget(self.components[key], *pos)
+
+        layout.addLayout(self.grid)
+        self.setLayout(layout)
+
+        # Timer to update display every 2 seconds
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_status)
+        self.timer.start(2000)
+
+    def refresh_status(self):
+        if not os.path.exists(STATUS_FILE):
+            for key in self.components:
+                self.components[key].update_status("No Data")
+            return
+
+        try:
+            with open(STATUS_FILE, "r") as f:
+                data = json.load(f)
+
+            is_anomaly = data.get("is_anomaly", False)
+            fault_class = data.get("fault_class", -1)
+            confidence = data.get("confidence", 0.0)
+            fault_label = FAULT_CLASS_MAP.get(fault_class, "Unknown Fault")
+
+
+            # Reset all parts
+            for key in self.components:
+                self.components[key].update_status("Normal")
+
+            # Update based on overall system anomaly status
+            if is_anomaly:
+                if fault_class != -1 and confidence >= FAULT_CONFIDENCE_THRESHOLD:
+                    part_affected = PART_MAP.get(fault_label, None)
+                    if part_affected and part_affected in self.components:
+                        self.components[part_affected].update_status(f"FAULT: {fault_label} ({confidence:.0%})", is_fault=True)
+                    else:
+                        print(f"[GUI] Warning: Fault '{fault_label}' mapped to unknown part '{part_affected}' or not in display components.")
+                else:
+                    print(f"[GUI] Anomaly detected, but no specific fault classified or low confidence (Class: {fault_class}, Conf: {confidence:.2f}).")
+            else:
+                pass # Already reset to "Normal" above
+
+        except json.JSONDecodeError:
+            print(f"[GUI] Error decoding JSON from {STATUS_FILE}. File might be corrupted or incomplete.")
+            for key in self.components:
+                self.components[key].update_status("Error Reading Data")
+        except Exception as e:
+            print(f"[GUI] Failed to update GUI: {e}")
+            for key in self.components:
+                self.components[key].update_status("Update Error")
+                
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = TractorHealthGUI()
+    window.show()
+    sys.exit(app.exec_())
+
+
+
+Note that the system would be implemented on a D-series 4WD tractor, and i have pictures/diagrams/tables/workflows of the following:
+1. A table of a full list of potential failures that could be monitored
+2. Table of ten failures that would be monitored using sensors
+3. A diagram of the tractor with numbers on different locations which represent a potential failure that could be monitored at that point
+4. A table with 10 failures to be monitored with numbered locations corresponding to the tractor diagram
+5. A table showing names of temperature sensors, picture of the temperature sensors and the picture of the location on the tractor that it would be situated
+6. A picture of the 3 axis accelerometer used with part number 1738-SEN 0386-ND
+7. A table showing names of switch float level sensors, picture of the float level sensors and the picture of the location on the tractor that it would be situated
+8. A picture showing prototype of connection of arduino to raspberry pi using a breadboard
+9. A picture showing calibration of temperature sensors using ice water and fire torch
+10. A picture showing the gui beside the arduino and breadboard during prototyping
+11. A pinout figure between raspberry pi and the MCP2515 module for can reading
+12. A picture of the gui displaying an issue
+13. A picture of the GUI
+14. 2 wiring diagram from the enclosure box containing arduino and raspberry pi to different sensors at different locations being monitored on the tractor
+15. A visualization of the wiring diagram with pictures of the sensors at each location
+16. A picture showing 18 gauge wire used for wiring and a wire loom used to wrap the wire for the wiring harness
+17. A picture showing the enclosure box for the arduino and raspberry pi
+18. A picture showing the location where the enclosure box would be inside the tractor (inside the tractor cabin next to the fuse panel
+19. A picture showing the connection at the enclosure box using deutsch connectors
+20. A picture of deutsch pins and sockets
+21. A picture showing the tools used to perform wiring and harnessing
+22. A picture of a D-series 4WD tractor
+Note i would like you to also make some DAQ for some workflows where appropriate (for example when talking about the automated pipeline, make a daq of the components of the pipeline; do this and other figures/diagrams/daq/flow charts that you deem necessary 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import sys
+import json
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel, QGridLayout, QFrame
+)
+from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QTimer
+
+
+# Mapping for fault class indices to human-readable labels
+FAULT_CLASS_MAP = {
+    0: "Overheated Front Brakes",
+    1: "Overheated Rear Brakes",
+    2: "Low Hydraulic Oil level",
+    3: "Too high Hydraulic Oil level",
+    4: "Low Transmission Oil level",
+    5: "Too high Transmission Oil level",
+    6: "Vibration Issue",
+    7: "Clutch Failure",
+    8: "Transmission Overheat",
+    9: "Engine Overheat",
+    10: "Alternator Overheat",
+    11: "Clutch Overheat",
+    12: "Engine Coolant Overheat",
+    13: "Engine RPM Failure",
+    14: "Fuel Overheat"
+}
+
+# Mapping for fault labels to the corresponding tractor part/component
+PART_MAP = {
+    "Overheated Front Brakes": "Brakes", # Changed from "Front Brakes" to "Brakes" to match GUI component key
+    "Overheated Rear Brakes": "Brakes",  # Changed from "Rear Brakes" to "Brakes" to match GUI component key
+    "Low Hydraulic Oil level": "Hydraulic Oil", # Changed from "Hydraulic Tank" to "Hydraulic Oil"
+    "Too high Hydraulic Oil level": "Hydraulic Oil", # Changed from "Hydraulic Tank" to "Hydraulic Oil"
+    "Low Transmission Oil level": "Transmission", # Changed from "Transmission Oil" to "Transmission"
+    "Too high Transmission Oil level": "Transmission", # Changed from "Transmission Oil" to "Transmission"
+    "Vibration Issue": "Cabin Vibration",
+    "Clutch Failure": "Engine",
+    "Transmission Overheat": "Transmission",
+    "Engine Overheat": "Engine", # Changed from "Engine Compartment" to "Engine"
+    "Alternator Overheat": "Alternator",
+    "Clutch Overheat": "Clutch",
+    "Engine Coolant Overheat": "Engine", # Assuming engine coolant is part of engine system
+    "Engine RPM Failure": "Engine",
+    "Fuel Overheat": "Fuel"
+}
+
+# Dynamically build the path to the status file, assuming it's in the same directory
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+STATUS_FILE = os.path.join(BASE_DIR, "latest_status.json")
+
+
+class StatusCard(QFrame):
+    """
+    A custom QFrame widget to display the status of a specific tractor component.
+    It shows a title and a status text, with color-coding for health status.
+    """
+    def __init__(self, title):
+        super().__init__()
+        self.setFrameShape(QFrame.Box) # Set frame shape to a box
+        self.setLineWidth(2) # Set line width for the border
+        self.setStyleSheet("background-color: #f0f0f0; border-radius: 10px;") # Default style
+        
+        layout = QVBoxLayout() # Vertical layout for title and status
+
+        self.title_label = QLabel(title)
+        self.title_label.setFont(QFont("Arial", 14, QFont.Bold)) # Bold font for title
+        self.title_label.setAlignment(Qt.AlignCenter) # Center align title
+
+        self.status_label = QLabel("Waiting...")
+        self.status_label.setFont(QFont("Arial", 12)) # Regular font for status
+        self.status_label.setAlignment(Qt.AlignCenter) # Center align status
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.status_label)
+        self.setLayout(layout)
+
+    def update_status(self, status_text, is_fault=False):
+        """
+        Updates the status text and background color of the card based on health.
+        :param status_text: The text to display as status.
+        :param is_fault: Boolean, True if the status indicates a fault, False otherwise.
+        """
+        self.status_label.setText(status_text)
+        if is_fault:
+            # Red background for faults
+            self.setStyleSheet("background-color: #ffcccc; border-radius: 10px;")
+        elif status_text == "Normal":
+            # Green background for normal status
+            self.setStyleSheet("background-color: #ccffcc; border-radius: 10px;")
+        else:
+            # Default light grey for other statuses (e.g., "Waiting...")
+            self.setStyleSheet("background-color: #f0f0f0; border-radius: 10px;")
+
+
+class TractorHealthGUI(QWidget):
+    """
+    Main GUI window for the Tractor Health Dashboard.
+    Displays health status of various tractor components in real-time.
+    """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Tractor Health Dashboard")
+        self.setGeometry(100, 100, 800, 400) # Initial window size and position
+        self.setStyleSheet("background-color: #ffffff;") # White background for the main window
+
+        layout = QVBoxLayout() # Main vertical layout for the window
+        
+        title = QLabel("Real-Time Tractor Health Monitoring")
+        title.setFont(QFont("Arial", 20, QFont.Bold)) # Large, bold font for the main title
+        title.setAlignment(Qt.AlignCenter) # Center align the main title
+        layout.addWidget(title)
+
+        self.grid = QGridLayout() # Grid layout for component status cards
+
+        # Initialize StatusCard widgets for key tractor components
+        self.components = {
+            "Engine": StatusCard("Engine"),
+            "Brakes": StatusCard("Brakes"),
+            "Hydraulic Oil": StatusCard("Hydraulic Oil"),
+            "Cabin Vibration": StatusCard("Cabin Vibration"),
+            "Transmission": StatusCard("Transmission"),
+            "Alternator": StatusCard("Alternator"), # Added Alternator to GUI
+            "Clutch": StatusCard("Clutch"),         # Added Clutch to GUI
+            "Fuel": StatusCard("Fuel")              # Added Fuel to GUI
+        }
+
+        # Arrange component cards in a 2x4 grid
+        positions = [(i, j) for i in range(2) for j in range(4)] # Adjusted for 8 components
+        sorted_keys = sorted(self.components.keys()) # Sort keys for consistent layout
+        for pos, key in zip(positions, sorted_keys):
+            self.grid.addWidget(self.components[key], *pos)
+
+        layout.addLayout(self.grid) # Add the grid layout to the main vertical layout
+        self.setLayout(layout) # Set the main layout for the window
+
+        # Timer to refresh the display by reading the status file every 2 seconds
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_status)
+        self.timer.start(2000) # Update every 2000 milliseconds (2 seconds)
+
+    def refresh_status(self):
+        """
+        Reads the latest status from the JSON file and updates the GUI.
+        """
+        if not os.path.exists(STATUS_FILE):
+            # If the status file does not exist, do nothing
+            return
+
+        try:
+            with open(STATUS_FILE, "r") as f:
+                data = json.load(f)
+
+            # Extract anomaly and fault information from the loaded JSON data
+            is_anomaly = data.get("anomaly_detection", {}).get("is_anomalous", False)
+            fault_label = data.get("fault_classification", {}).get("predicted_fault", "None")
+
+            # Reset all component cards to "Normal" status initially
+            for key in self.components:
+                self.components[key].update_status("Normal")
+
+            # If an anomaly is detected and a specific fault is classified, highlight the affected part
+            if is_anomaly and fault_label != "None":
+                part_key = PART_MAP.get(fault_label, "")
+                if part_key in self.components:
+                    # Update the status card for the affected part to show the fault
+                    self.components[part_key].update_status(fault_label, is_fault=True)
+                else:
+                    # If the part is not a direct component shown on the dashboard,
+                    # provide a general "Anomaly Detected" message on a relevant card or add a general status card.
+                    # For simplicity, we'll just print to console if not mapped to a visible component.
+                    print(f"Fault '{fault_label}' detected, but part '{part_key}' is not a directly displayed component.")
+            elif is_anomaly and fault_label == "None":
+                # If an anomaly is detected but no specific fault is classified (unsupervised detection)
+                # This could be handled by a general "Anomaly Detected" card or a specific indicator.
+                # For now, we'll keep all "Normal" if no specific part is to be highlighted.
+                print("General anomaly detected without specific fault classification.")
+
+
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from {STATUS_FILE}: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred during GUI update: {e}")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = TractorHealthGUI()
+    window.show()
+    sys.exit(app.exec_())

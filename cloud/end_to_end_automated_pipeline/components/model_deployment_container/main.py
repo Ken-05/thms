@@ -1,0 +1,89 @@
+# main.py for model_deployment_component
+import os
+import argparse
+from google.cloud import aiplatform
+
+def model_deployment_component_main(
+    project: str,
+    region: str,
+    autoencoder_model_uri: str,
+    classifier_model_uri: str,
+    endpoint_display_name: str,
+):
+    """
+    Deploys autoencoder and classifier models to a shared Vertex AI Endpoint.
+    Reuses an existing endpoint if one with the display name is found.
+    """
+    aiplatform.init(project=project, location=region)
+
+    # Registers the Autoencoder Model with Vertex AI Model Registry.
+    autoencoder_model_registered = aiplatform.Model.upload(
+        display_name="autoencoder-model-for-pipeline",
+        artifact_uri=autoencoder_model_uri,
+        serving_container_image_uri=f"{region}-docker.pkg.dev/vertex-ai/prediction/tf2-cpu.2-13:latest",
+    )
+    print(f"Autoencoder Model Registered: {autoencoder_model_registered.resource_name}")
+
+    # Registers the Classifier Model with Vertex AI Model Registry.
+    classifier_model_registered = aiplatform.Model.upload(
+        display_name="classifier-model-for-pipeline",
+        artifact_uri=classifier_model_uri,
+        serving_container_image_uri=f"{region}-docker.pkg.dev/vertex-ai/prediction/tf2-cpu.2-13:latest",
+    )
+    print(f"Classifier Model Registered: {classifier_model_registered.resource_name}")
+
+    # Attempts to find an existing endpoint with the specified display name.
+    endpoints = aiplatform.Endpoint.list(filter=f'display_name="{endpoint_display_name}"')
+    if endpoints:
+        endpoint = endpoints[0]
+        print(f"Reusing existing endpoint: {endpoint.resource_name}")
+    else:
+        # Creates a new endpoint if no existing one is found.
+        endpoint = aiplatform.Endpoint.create(display_name=endpoint_display_name, project=project, location=region)
+        print(f"Created new endpoint: {endpoint.resource_name}")
+
+    # Deploys the Autoencoder model to the endpoint.
+    print(f"Deploying Autoencoder Model to {endpoint.display_name}...")
+    autoencoder_model_registered.deploy(
+        endpoint=endpoint,
+        deployed_model_display_name="autoencoder-deployed-instance",
+        machine_type="n1-standard-2", # Specifies the machine type for the deployed model.
+        min_replica_count=1,
+        max_replica_count=1,
+        traffic_split={"autoencoder-deployed-instance": 100} # Directs all traffic to this deployed model.
+    )
+    print("Autoencoder Model Deployed.")
+
+    # Deploys the Classifier model to the endpoint.
+    print(f"Deploying Classifier Model to {endpoint.display_name}...")
+    classifier_model_registered.deploy(
+        endpoint=endpoint,
+        deployed_model_display_name="classifier-deployed-instance",
+        machine_type="n1-standard-2", # Specifies the machine type for the deployed model.
+        min_replica_count=1,
+        max_replica_count=1,
+        traffic_split={"classifier-deployed-instance": 100} # Directs all traffic to this deployed model.
+    )
+    print("Classifier Model Deployed.")
+    
+    # Prints the endpoint's resource name and URI for reference.
+    print(f"Endpoint ID: {endpoint.resource_name}")
+    print(f"Endpoint URI: {endpoint.uri}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Model Deployment Component")
+    parser.add_argument("--project", type=str, required=True, help="Google Cloud project ID.")
+    parser.add_argument("--region", type=str, required=True, help="Google Cloud region.")
+    parser.add_argument("--autoencoder_model_uri", type=str, required=True, help="GCS URI of the Autoencoder model artifact.")
+    parser.add_argument("--classifier_model_uri", type=str, required=True, help="GCS URI of the Classifier model artifact.")
+    parser.add_argument("--endpoint_display_name", type=str, required=True, help="Display name for the Vertex AI endpoint.")
+    
+    args = parser.parse_args()
+    model_deployment_component_main(
+        project=args.project,
+        region=args.region,
+        autoencoder_model_uri=args.autoencoder_model_uri,
+        classifier_model_uri=args.classifier_model_uri,
+        endpoint_display_name=args.endpoint_display_name
+    )

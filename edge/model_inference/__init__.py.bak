@@ -1,0 +1,207 @@
+# update_models.py
+
+from google.cloud import storage
+import os
+import subprocess
+import time
+from datetime import datetime
+
+# This script is used to update the models used for 
+# inference at the edge because retraining happens
+# in the cloud on new data everyday, so the models
+# are downloaded and updated locally to the same
+# directory that contains the edge_inference.py 
+# everyday. 
+
+# This script is run periodically via a cron job 
+# at 3:30 AM everyday(1 hour after another cron job 
+# uploads a csv file of combined data gotten from 
+# sensors and CANBus to the cloud)
+
+# --- Configuration ---
+GCP_CREDENTIALS_PATH = "/home/pi/keys/gcp-service-account.json"
+GCS_BUCKET_NAME = "tractor-health-monitoring-bucket"
+GCS_MODELS_PREFIX = "tflite_models/" # Prefix to list folders, ends with '/'
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+LOCAL_MODEL_DIR = BASE_DIR # Where models are currently used
+#LOCAL_TEMP_DIR = "/home/pi/anomaly_detector/temp_models_download/" # Temporary download location
+#LOCAL_TEMP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "edge", "model_inference"))
+LOCAL_TEMP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "temp_models_download"))
+
+SERVICE_NAME = "data_collect.service" # The name of the systemd service for data_collect.py
+
+# --- Setup Google Cloud Storage Client ---
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS_PATH
+try:
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    print("[UpdateScript] GCS client initialized.")
+except Exception as e:
+    print(f"[UpdateScript] ERROR: Failed to initialize GCS client: {e}")
+    exit(1) # Exit if cannot connect to GCS
+
+
+def get_latest_model_version():
+    """
+    Lists directories under GCS_MODELS_PREFIX and returns the latest YYYY-MM-DD version.
+    Assumes directory names are in YYYY-MM-DD format and are sortable.
+    """
+    try:
+        # List blobs, and filter for directories (common prefix) to find version folders
+        # Using delimiter '/' to list 'directories'
+        blobs = bucket.list_blobs(prefix=GCS_MODELS_PREFIX, delimiter='/')
+
+        # The .prefixes attribute contains the "directories" found by the delimiter
+        version_folders = [prefix.rstrip('/') for prefix in blobs.prefixes if prefix.rstrip('/')]
+
+        # Filter for YYYY-MM-DD format and sort to get the latest
+        valid_versions = []
+        for vf in version_folders:
+            # Extract just the date part, e.g., "tflite_models/2025-07-18" -> "2025-07-18"
+            version_date_str = vf.split('/')[-1] 
+            try:
+                datetime.strptime(version_date_str, "%Y-%m-%d") # Validate format
+                valid_versions.append(version_date_str)
+            except ValueError:
+                continue # Skip if not in YYYY-MM-DD format
+
+        if not valid_versions:
+            return None
+
+        # Return the latest version (string comparison works for YYYY-MM-DD)
+        return sorted(valid_versions)[-1]
+
+    except Exception as e:
+        print(f"[UpdateScript] ERROR listing GCS versions: {e}")
+        return None
+
+def download_model_files(gcs_version_path, local_target_dir):
+    """
+    Downloads model files from a given GCS version to a local directory.
+    """
+    gcs_source_prefix = f"{GCS_MODELS_PREFIX}{gcs_version_path}/"
+    print(f"[UpdateScript] Downloading from GCS prefix: {gcs_source_prefix}")
+
+    # Ensure local temporary directory exists and is empty
+    os.makedirs(local_target_dir, exist_ok=True)
+    for f in os.listdir(local_target_dir):
+        os.remove(os.path.join(local_target_dir, f))
+
+    try:
+        blobs = bucket.list_blobs(prefix=gcs_source_prefix)
+        downloaded_count = 0
+        for blob in blobs:
+            # Only download the actual files, not the directory itself
+            if blob.name.endswith('/'): # Skip directory blobs
+                continue
+            file_name = os.path.basename(blob.name)
+            local_file_path = os.path.join(local_target_dir, file_name)
+            blob.download_to_filename(local_file_path)
+            print(f"[UpdateScript] Downloaded {file_name}")
+            downloaded_count += 1
+
+        if downloaded_count == 0:
+            print(f"[UpdateScript] Warning: No files found to download at {gcs_source_prefix}")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"[UpdateScript] ERROR downloading model files: {e}")
+        return False
+
+def replace_models(source_dir, target_dir):
+    """
+    Atomically replaces old models with new ones.
+    Removes existing files in target_dir and copies new ones.
+    """
+    try:
+        # Clear existing models
+        if os.path.exists(target_dir):
+            for f in os.listdir(target_dir):
+                os.remove(os.path.join(target_dir, f))
+        else:
+            os.makedirs(target_dir, exist_ok=True)
+
+        # Copy new models
+        for f in os.listdir(source_dir):
+            src_file = os.path.join(source_dir, f)
+            dst_file = os.path.join(target_dir, f)
+            os.rename(src_file, dst_file) # os.rename is atomic on the same filesystem
+            print(f"[UpdateScript] Replaced {f}")
+        print("[UpdateScript] Models replaced successfully.")
+        return True
+    except Exception as e:
+        print(f"[UpdateScript] ERROR replacing models: {e}")
+        return False
+
+def restart_service(service_name):
+    """Restarts the systemd service."""
+    try:
+        print(f"[UpdateScript] Stopping {service_name}...")
+        subprocess.run(["sudo", "systemctl", "stop", service_name], check=True)
+        time.sleep(2) # Give a moment to stop
+        print(f"[UpdateScript] Starting {service_name}...")
+        subprocess.run(["sudo", "systemctl", "start", service_name], check=True)
+        print(f"[UpdateScript] {service_name} restarted.")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[UpdateScript] ERROR restarting service: {e}")
+        return False
+
+def get_current_model_version(local_model_dir):
+    """
+    Tries to determine the currently deployed model version.
+    """
+    version_file_path = os.path.join(local_model_dir, "VERSION")
+    if os.path.exists(version_file_path):
+        with open(version_file_path, 'r') as f:
+            return f.read().strip()
+    return None
+
+def set_current_model_version(local_model_dir, version):
+    """Writes the current model version to a file."""
+    version_file_path = os.path.join(local_model_dir, "VERSION")
+    with open(version_file_path, 'w') as f:
+        f.write(version)
+    print(f"[UpdateScript] Updated local model version to {version}")
+
+
+if __name__ == "__main__":
+    print(f"--- Model Update Script Started: {datetime.now()} ---")
+
+    latest_gcs_version = get_latest_model_version()
+    if not latest_gcs_version:
+        print("[UpdateScript] No model versions found in GCS or error occurred. Exiting.")
+        exit(0) # Not an error if no versions, just nothing to do
+
+    current_local_version = get_current_model_version(LOCAL_MODEL_DIR)
+
+    print(f"[UpdateScript] Latest GCS version: {latest_gcs_version}")
+    print(f"[UpdateScript] Current local version: {current_local_version}")
+
+    if latest_gcs_version == current_local_version:
+        print("[UpdateScript] Local models are already up-to-date. No update needed.")
+        exit(0)
+
+    print(f"[UpdateScript] New version '{latest_gcs_version}' available. Initiating download...")
+
+    if not download_model_files(latest_gcs_version, LOCAL_TEMP_DIR):
+        print("[UpdateScript] Model download failed. Exiting.")
+        exit(1)
+
+    print("[UpdateScript] Download successful. Replacing models...")
+    if not replace_models(LOCAL_TEMP_DIR, LOCAL_MODEL_DIR):
+        print("[UpdateScript] Model replacement failed. Exiting.")
+        exit(1)
+
+    # Update the local version marker
+    set_current_model_version(LOCAL_MODEL_DIR, latest_gcs_version)
+
+    print("[UpdateScript] Attempting to restart data_collect.service...")
+    if not restart_service(SERVICE_NAME):
+        print("[UpdateScript] Service restart failed. Manual intervention might be needed.")
+        exit(1)
+
+    print("--- Model Update Script Finished ---")
+    exit(0)

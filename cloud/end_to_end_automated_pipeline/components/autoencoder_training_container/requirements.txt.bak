@@ -1,0 +1,6 @@
+pandas
+numpy
+tensorflow==2.13.0  # Match the version used for model building
+scikit-learn        # For train_test_split in train_autoencoder and preprocess
+keras-tuner         # For hyperparameter tuning
+joblib              # For saving the scaler

@@ -1,0 +1,47 @@
+# main.py for classifier_model_training_component
+import os
+import argparse
+import subprocess
+
+def classifier_model_training_component_main(
+    train_data_path: str,
+    val_data_path: str,
+    test_data_path: str,
+    h5_output_path: str,
+    tflite_output_path: str,
+):
+    """
+    Executes the Classifier model training script.
+    The script trains the model, saves it as an H5 file, and converts it to TFLite format.
+    """
+    print(f"Starting Classifier training with data from {train_data_path} and {test_data_path}")
+    
+    # Executes the external 'train_classifier.py' script.
+    # The script is expected to be located at /end_to_end_automated_pipeline/training_pipeline/train_classifier.py
+    # within the Docker container.
+    subprocess.run([
+        "python", "/end_to_end_automated_pipeline/training_pipeline/train_classifier.py",
+        "--train_path", train_data_path,
+        "--val_path", val_data_path,
+        "--test_path", test_data_path,
+        "--h5_output_path", h5_output_path,      # Script saves Keras .h5 model here
+        "--tflite_output_path", tflite_output_path # Script saves .tflite model here
+    ], check=True) # Ensures the subprocess completes successfully.
+    print("Classifier training complete.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Classifier Model Training Component")
+    parser.add_argument("--train_data_path", type=str, required=True, help="Local path to the training data CSV.")
+    parser.add_argument("--val_data_path", type=str, required=True, help="Local path to the validation data CSV.")
+    parser.add_argument("--test_data_path", type=str, required=True, help="Local path to the testing data CSV.")
+    parser.add_argument("--h5_output_path", type=str, required=True, help="Local path for the trained Keras H5 model.")
+    parser.add_argument("--tflite_output_path", type=str, required=True, help="Local path for the trained TFLite model.")
+    
+    args = parser.parse_args()
+    classifier_model_training_component_main(
+        train_data_path=args.train_data_path,
+        test_data_path=args.test_data_path,
+        h5_output_path=args.h5_output_path,
+        tflite_output_path=args.tflite_output_path
+    )
