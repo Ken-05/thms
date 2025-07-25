@@ -1,13 +1,5 @@
-# thms
-An end-to-end machine learning and IoT system with cloud analytics for real-time thm using s and C b data.
 
-# 🚜 Tractor Health Monitoring System
-
-An end-to-end machine learning and IoT system with cloud analytics for real-time tractor health monitoring using sensor and CAN bus data.
-
-
-
-# Tractor Health Monitoring: Edge-to-Cloud MLOps Pipeline
+# Tractor Health Monitoring System: Bi-directional Edge-Cloud MLOps Pipeline
 
 ## Project Overview
 
