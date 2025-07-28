@@ -1,6 +1,0 @@
-pandas
-numpy
-tensorflow==2.13.0  # Match the version used for model building
-scikit-learn        # For LabelEncoder, train_test_split in train_classifier and preprocess
-keras-tuner         # For hyperparameter tuning
-shap                # For model explainability
